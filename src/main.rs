@@ -18,14 +18,17 @@ use tracing_subscriber::EnvFilter;
 const SHORT_CODE_LEN: usize = 7;
 
 fn qr_svg(short_code: &str) -> String {
-    let base_url = std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3000".into());
-    let url = format!("{base_url}/{short_code}");
+    let url = format!("{}/{short_code}", public_url());
     let code = QrCode::new(url.as_bytes()).unwrap();
     code.render::<svg::Color>()
         .dark_color(svg::Color("#0f172a"))
         .light_color(svg::Color("#e2e8f0"))
         .min_dimensions(6, 6)
         .build()
+}
+
+fn public_url() -> String {
+    std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3000".into())
 }
 
 fn generate_code() -> String {
@@ -58,6 +61,19 @@ async fn get_link_db(
     tokio::task::spawn_blocking(move || {
         let conn = state.conn.lock().unwrap();
         db::get_link(&conn, &code)
+    })
+    .await
+    .unwrap()
+    .map_err(|e| e.to_string())
+}
+
+async fn get_all_links_db(
+    state: &SharedState,
+) -> std::result::Result<Vec<(String, String, i64, String)>, String> {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = state.conn.lock().unwrap();
+        db::get_all_links(&conn)
     })
     .await
     .unwrap()
@@ -253,7 +269,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       </div>
     </form>
     <div id='result'></div>
-    <div class='footer'>Powered by <a href='https://www.rust-lang.org/'>Rust</a> + <a href='https://htmx.org/'>HTMX</a></div>
+    <div class='footer'><a href='/dashboard'>Dashboard</a> · Powered by <a href='https://www.rust-lang.org/'>Rust</a> + <a href='https://htmx.org/'>HTMX</a></div>
   </div>
 </body>
 </html>"##;
@@ -280,6 +296,7 @@ async fn main() {
         .route("/", get(index))
         .route("/shorten", post(shorten_form))
         .route("/api/shorten", post(shorten_json))
+        .route("/dashboard", get(dashboard))
         .route("/stats/{short_code}", get(stats))
         .route("/qr/{short_code}", get(qr_code))
         .route("/{short_code}", get(redirect))
@@ -313,7 +330,7 @@ async fn shorten_form(
     let qr = qr_svg(&short_code);
     Html(format!(
         r##"<div class="card">
-            <div class="short-url"><a href="/{code}" target="_blank">localhost:3000/{code}</a></div>
+            <div class="short-url"><a href="/{code}" target="_blank">{base}/{code}</a></div>
             <div class="original-link"><a href="{url}" target="_blank">{url}</a></div>
             <div class='qr-wrap'>{qr}</div>
             <div class="meta">
@@ -323,6 +340,7 @@ async fn shorten_form(
             </div>
         </div>"##,
         code = short_code,
+        base = public_url(),
         url = req.url,
         visits = 0,
         plural = "s",
@@ -414,6 +432,147 @@ async fn qr_code(
     }
 }
 
+async fn dashboard(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    match get_all_links_db(&state).await {
+        Ok(links) => {
+            let mut rows = String::new();
+            for (short_code, original_url, visits, created_at) in &links {
+                rows.push_str(&format!(
+                    r##"<tr>
+                        <td><a href="/{code}" target="_blank">{code}</a></td>
+                        <td class='url-cell'><a href="{url}" target="_blank" title="{url}">{url}</a></td>
+                        <td class='num'>{visits}</td>
+                        <td>{created}</td>
+                    </tr>"##,
+                    code = short_code,
+                    url = original_url,
+                    visits = visits,
+                    created = created_at,
+                ));
+            }
+
+            let plural = if links.len() == 1 { "" } else { "s" };
+
+            Html(format!(
+                r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard · Shrtnr</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: 'Inter', system-ui, sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+      color: #e2e8f0;
+    }}
+    .container {{
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 2rem;
+      width: 100%;
+      max-width: 900px;
+      margin: 0 auto;
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+    }}
+    .header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1.5rem;
+    }}
+    .header h1 {{
+      font-size: 1.5rem;
+      font-weight: 600;
+    }}
+    .header a {{
+      color: #818cf8;
+      text-decoration: none;
+      font-size: 0.875rem;
+    }}
+    .header a:hover {{ text-decoration: underline; }}
+    .count {{ color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem; }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+    th {{
+      text-align: left;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748b;
+      padding: 0.75rem 0.5rem;
+      border-bottom: 1px solid #334155;
+    }}
+    td {{
+      padding: 0.75rem 0.5rem;
+      border-bottom: 1px solid #1e293b;
+      font-size: 0.875rem;
+    }}
+    tr:hover td {{ background: #0f172a40; }}
+    td a {{ color: #a5b4fc; text-decoration: none; }}
+    td a:hover {{ text-decoration: underline; }}
+    .url-cell {{
+      max-width: 300px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }}
+    .url-cell a {{ color: #94a3b8; }}
+    .num {{ text-align: right; font-variant-numeric: tabular-nums; color: #e2e8f0; }}
+    .empty {{ text-align: center; padding: 3rem 1rem; color: #64748b; }}
+    .empty a {{ color: #818cf8; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Dashboard</h1>
+      <a href="/">← Shorten a URL</a>
+    </div>
+    <div class="count">{total} link{plural}</div>
+    {table}
+  </div>
+</body>
+</html>"##,
+                total = links.len(),
+                plural = plural,
+                table = if links.is_empty() {
+                    r##"<div class='empty'>No links yet. <a href='/'>Create one →</a></div>"##.to_string()
+                } else {
+                    format!(
+                        r##"<table>
+                            <thead><tr>
+                                <th>Short code</th>
+                                <th>Original URL</th>
+                                <th class='num'>Visits</th>
+                                <th>Created</th>
+                            </tr></thead>
+                            <tbody>{rows}</tbody>
+                        </table>"##
+                    )
+                },
+            ))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<div class='error'>Error: {e}</div>")),
+        )
+            .into_response(),
+    }
+}
+
 async fn stats(
     State(state): State<SharedState>,
     Path(short_code): Path<String>,
@@ -426,7 +585,7 @@ async fn stats(
                 let qr = qr_svg(&short_code);
                 Html(format!(
                     r##"<div class="card">
-                        <div class="short-url"><a href="/{code}" target="_blank">localhost:3000/{code}</a></div>
+                        <div class="short-url"><a href="/{code}" target="_blank">{base}/{code}</a></div>
                         <div class="original-link"><a href="{url}" target="_blank">{url}</a></div>
                         <div class='qr-wrap'>{qr}</div>
                         <div class="meta">
@@ -436,6 +595,7 @@ async fn stats(
                         </div>
                     </div>"##,
                     code = short_code,
+                    base = public_url(),
                     url = original_url,
                     visits = visits,
                     plural = if visits == 1 { "" } else { "s" },

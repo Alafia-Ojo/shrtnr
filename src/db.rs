@@ -39,3 +39,22 @@ pub fn increment_visits(conn: &Connection, short_code: &str) -> Result<()> {
     )?;
     Ok(())
 }
+
+pub fn get_all_links(conn: &Connection) -> Result<Vec<(String, String, i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT short_code, original_url, visits, created_at FROM links ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+        ))
+    })?;
+    let mut links = Vec::new();
+    for row in rows {
+        links.push(row?);
+    }
+    Ok(links)
+}
