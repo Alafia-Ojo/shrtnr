@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, params};
+use rusqlite::{Connection, OptionalExtension, Result, params};
 
 pub fn init_db(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
@@ -24,16 +24,12 @@ pub fn insert_link(conn: &Connection, short_code: &str, original_url: &str) -> R
 }
 
 pub fn get_link(conn: &Connection, short_code: &str) -> Result<Option<(String, i64)>> {
-    let mut stmt = conn.prepare("SELECT original_url, visits FROM links WHERE short_code = ?1")?;
-    let mut rows = stmt.query(params![short_code])?;
-    match rows.next()? {
-        Some(row) => {
-            let url: String = row.get(0)?;
-            let visits: i64 = row.get(1)?;
-            Ok(Some((url, visits)))
-        }
-        None => Ok(None),
-    }
+    conn.query_row(
+        "SELECT original_url, visits FROM links WHERE short_code = ?1",
+        params![short_code],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
 }
 
 pub fn increment_visits(conn: &Connection, short_code: &str) -> Result<()> {

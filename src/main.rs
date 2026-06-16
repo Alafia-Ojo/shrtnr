@@ -9,20 +9,68 @@ use axum::{
     routing::{get, post},
 };
 use models::*;
-use qrcode::render::svg;
 use qrcode::QrCode;
+use qrcode::render::svg;
 use std::sync::{Arc, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
+const SHORT_CODE_LEN: usize = 7;
+
 fn qr_svg(short_code: &str) -> String {
-    let url = format!("http://localhost:3000/{short_code}");
+    let base_url = std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3000".into());
+    let url = format!("{base_url}/{short_code}");
     let code = QrCode::new(url.as_bytes()).unwrap();
     code.render::<svg::Color>()
-        .dark_color(svg::Color("#e2e8f0"))
-        .light_color(svg::Color("#0f172a00"))
+        .dark_color(svg::Color("#0f172a"))
+        .light_color(svg::Color("#e2e8f0"))
         .min_dimensions(6, 6)
         .build()
+}
+
+fn generate_code() -> String {
+    nanoid::nanoid!(SHORT_CODE_LEN)
+}
+
+async fn insert_with_code(
+    state: &SharedState,
+    code: &str,
+    url: &str,
+) -> std::result::Result<(), String> {
+    let state = state.clone();
+    let code = code.to_owned();
+    let url = url.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = state.conn.lock().unwrap();
+        db::insert_link(&conn, &code, &url)
+    })
+    .await
+    .unwrap()
+    .map_err(|e| e.to_string())
+}
+
+async fn get_link_db(
+    state: &SharedState,
+    code: &str,
+) -> std::result::Result<Option<(String, i64)>, String> {
+    let state = state.clone();
+    let code = code.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = state.conn.lock().unwrap();
+        db::get_link(&conn, &code)
+    })
+    .await
+    .unwrap()
+    .map_err(|e| e.to_string())
+}
+
+fn increment_visits_db(state: &SharedState, code: &str) {
+    let state = state.clone();
+    let code = code.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = state.conn.lock().unwrap();
+        let _ = db::increment_visits(&conn, &code);
+    });
 }
 
 const INDEX_HTML: &str = r##"<!DOCTYPE html>
@@ -180,7 +228,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       width: 140px;
       height: 140px;
       border-radius: 8px;
-      background: #0f172a;
+      background: #e2e8f0;
       padding: 8px;
     }
   </style>
@@ -222,7 +270,8 @@ async fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let conn = db::init_db("urlshort.db").expect("failed to initialize database");
+    let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "urlshort.db".into());
+    let conn = db::init_db(&db_path).expect("failed to initialize database");
     let state = Arc::new(AppState {
         conn: Mutex::new(conn),
     });
@@ -237,7 +286,8 @@ async fn main() {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let addr = "0.0.0.0:3000";
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
+    let addr = format!("0.0.0.0:{port}");
     tracing::info!("listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -251,66 +301,71 @@ async fn shorten_form(
     State(state): State<SharedState>,
     Form(req): Form<ShortenRequest>,
 ) -> Html<String> {
-    let short_code = nanoid::nanoid!(7);
-    let conn = state.conn.lock().unwrap();
-    match db::insert_link(&conn, &short_code, &req.url) {
-        Ok(()) => {
-            let qr = qr_svg(&short_code);
-            Html(format!(
-                r##"<div class="card">
-                <div class="short-url"><a href="/{code}" target="_blank">localhost:3000/{code}</a></div>
-                <div class="original-link"><a href="{url}" target="_blank">{url}</a></div>
-                <div class='qr-wrap'>{qr}</div>
-                <div class="meta">
-                    <span>{visits} visit{plural}</span>
-                    <span class='sep'>·</span>
-                    <a href='#' hx-get='/stats/{code}' hx-target='closest .card' hx-swap='outerHTML'>refresh</a>
-                </div>
-            </div>"##,
-                code = short_code,
-                url = req.url,
-                visits = 0,
-                plural = "s",
-                qr = qr,
-            ))
+    let short_code = loop {
+        let code = generate_code();
+        match insert_with_code(&state, &code, &req.url).await {
+            Ok(()) => break code,
+            Err(e) if e.contains("UNIQUE") => continue,
+            Err(e) => return Html(format!(r#"<div class="card error">Error: {e}</div>"#)),
         }
-        Err(e) => Html(format!(r#"<div class="card error">Error: {e}</div>"#)),
-    }
+    };
+
+    let qr = qr_svg(&short_code);
+    Html(format!(
+        r##"<div class="card">
+            <div class="short-url"><a href="/{code}" target="_blank">localhost:3000/{code}</a></div>
+            <div class="original-link"><a href="{url}" target="_blank">{url}</a></div>
+            <div class='qr-wrap'>{qr}</div>
+            <div class="meta">
+                <span>{visits} visit{plural}</span>
+                <span class='sep'>·</span>
+                <a href='#' hx-get='/stats/{code}' hx-target='closest .card' hx-swap='outerHTML'>refresh</a>
+            </div>
+        </div>"##,
+        code = short_code,
+        url = req.url,
+        visits = 0,
+        plural = "s",
+        qr = qr,
+    ))
 }
 
 async fn shorten_json(
     State(state): State<SharedState>,
     Json(req): Json<ShortenRequest>,
 ) -> impl IntoResponse {
-    let short_code = nanoid::nanoid!(7);
-    let conn = state.conn.lock().unwrap();
-    match db::insert_link(&conn, &short_code, &req.url) {
-        Ok(()) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!(ShortenResponse {
-                short_code: short_code.clone(),
-                original_url: req.url.clone(),
-            })),
-        )
-            .into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!(ErrorResponse {
-                error: e.to_string()
-            })),
-        )
-            .into_response(),
-    }
+    let short_code = loop {
+        let code = generate_code();
+        match insert_with_code(&state, &code, &req.url).await {
+            Ok(()) => break code,
+            Err(e) if e.contains("UNIQUE") => continue,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!(ErrorResponse { error: e })),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!(ShortenResponse {
+            short_code,
+            original_url: req.url,
+        })),
+    )
+        .into_response()
 }
 
 async fn redirect(
     State(state): State<SharedState>,
     Path(short_code): Path<String>,
 ) -> impl IntoResponse {
-    let conn = state.conn.lock().unwrap();
-    match db::get_link(&conn, &short_code) {
+    match get_link_db(&state, &short_code).await {
         Ok(Some((url, _))) => {
-            let _ = db::increment_visits(&conn, &short_code);
+            increment_visits_db(&state, &short_code);
             Redirect::temporary(&url).into_response()
         }
         Ok(None) => (
@@ -322,9 +377,7 @@ async fn redirect(
             .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!(ErrorResponse {
-                error: e.to_string()
-            })),
+            Json(serde_json::json!(ErrorResponse { error: e })),
         )
             .into_response(),
     }
@@ -334,8 +387,7 @@ async fn qr_code(
     State(state): State<SharedState>,
     Path(short_code): Path<String>,
 ) -> impl IntoResponse {
-    let conn = state.conn.lock().unwrap();
-    match db::get_link(&conn, &short_code) {
+    match get_link_db(&state, &short_code).await {
         Ok(Some(_)) => {
             let svg_str = qr_svg(&short_code);
             (
@@ -356,9 +408,7 @@ async fn qr_code(
             .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!(ErrorResponse {
-                error: e.to_string()
-            })),
+            Json(serde_json::json!(ErrorResponse { error: e })),
         )
             .into_response(),
     }
@@ -370,10 +420,10 @@ async fn stats(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let is_htmx = headers.contains_key("hx-request");
-    let conn = state.conn.lock().unwrap();
-    match db::get_link(&conn, &short_code) {
+    match get_link_db(&state, &short_code).await {
         Ok(Some((original_url, visits))) => {
             if is_htmx {
+                let qr = qr_svg(&short_code);
                 Html(format!(
                     r##"<div class="card">
                         <div class="short-url"><a href="/{code}" target="_blank">localhost:3000/{code}</a></div>
@@ -389,14 +439,14 @@ async fn stats(
                     url = original_url,
                     visits = visits,
                     plural = if visits == 1 { "" } else { "s" },
-                    qr = qr_svg(&short_code),
+                    qr = qr,
                 ))
                 .into_response()
             } else {
                 Json(serde_json::json!(StatsResponse {
                     short_code,
                     original_url,
-                    visits: visits as u64,
+                    visits: u64::try_from(visits).unwrap_or(0),
                 }))
                 .into_response()
             }
@@ -421,9 +471,7 @@ async fn stats(
             } else {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!(ErrorResponse {
-                        error: e.to_string()
-                    })),
+                    Json(serde_json::json!(ErrorResponse { error: e })),
                 )
                     .into_response()
             }
