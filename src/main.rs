@@ -119,6 +119,9 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       max-width: 480px;
       box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
     }
+    @media (max-width: 480px) {
+      .container { padding: 1.5rem; }
+    }
     .logo {
       display: flex;
       align-items: center;
@@ -150,8 +153,12 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       display: flex;
       gap: 0.5rem;
     }
+    @media (max-width: 400px) {
+      .input-wrap { flex-direction: column; }
+    }
     .input-wrap input {
       flex: 1;
+      width: 100%;
       padding: 0.75rem 1rem;
       font-size: 0.9375rem;
       font-family: inherit;
@@ -483,6 +490,7 @@ async fn dashboard(
       margin: 0 auto;
       box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
     }}
+    @media (max-width: 500px) {{ .container {{ padding: 1rem; }} }}
     .header {{
       display: flex;
       align-items: center;
@@ -522,6 +530,9 @@ async fn dashboard(
     tr:hover td {{ background: #0f172a40; }}
     td a {{ color: #a5b4fc; text-decoration: none; }}
     td a:hover {{ text-decoration: underline; }}
+    .table-wrap {{
+      overflow-x: auto;
+    }}
     .url-cell {{
       max-width: 300px;
       overflow: hidden;
@@ -532,6 +543,9 @@ async fn dashboard(
     .num {{ text-align: right; font-variant-numeric: tabular-nums; color: #e2e8f0; }}
     .empty {{ text-align: center; padding: 3rem 1rem; color: #64748b; }}
     .empty a {{ color: #818cf8; }}
+    @media (max-width: 600px) {{
+      .url-cell {{ max-width: 120px; }}
+    }}
   </style>
 </head>
 <body>
@@ -551,7 +565,7 @@ async fn dashboard(
                     r##"<div class='empty'>No links yet. <a href='/'>Create one →</a></div>"##.to_string()
                 } else {
                     format!(
-                        r##"<table>
+                        r##"<div class="table-wrap"><table>
                             <thead><tr>
                                 <th>Short code</th>
                                 <th>Original URL</th>
@@ -559,7 +573,7 @@ async fn dashboard(
                                 <th>Created</th>
                             </tr></thead>
                             <tbody>{rows}</tbody>
-                        </table>"##
+                        </table></div>"##
                     )
                 },
             ))
