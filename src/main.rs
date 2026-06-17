@@ -31,6 +31,14 @@ fn public_url() -> String {
     std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://localhost:3000".into())
 }
 
+fn ensure_scheme(url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_owned()
+    } else {
+        format!("https://{url}")
+    }
+}
+
 fn generate_code() -> String {
     nanoid::nanoid!(SHORT_CODE_LEN)
 }
@@ -266,11 +274,11 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       <h1>Shrtnr</h1>
     </div>
     <p class='subtitle'>Paste a long URL and get a short link</p>
-    <form hx-post='/shorten' hx-target='#result' hx-swap='innerHTML'>
+    <form hx-post='/shorten' hx-target='#result' hx-swap='innerHTML' hx-on::after-request="this.reset()">
       <div class='input-group'>
         <label for='url'>URL to shorten</label>
         <div class='input-wrap'>
-          <input type='url' id='url' name='url' placeholder='https://example.com/very/long/url' required autofocus>
+          <input type='text' id='url' name='url' placeholder='https://example.com/very/long/url' required autofocus>
           <button type='submit'>Shorten</button>
         </div>
       </div>
@@ -325,9 +333,10 @@ async fn shorten_form(
     State(state): State<SharedState>,
     Form(req): Form<ShortenRequest>,
 ) -> Html<String> {
+    let url = ensure_scheme(&req.url);
     let short_code = loop {
         let code = generate_code();
-        match insert_with_code(&state, &code, &req.url).await {
+        match insert_with_code(&state, &code, &url).await {
             Ok(()) => break code,
             Err(e) if e.contains("UNIQUE") => continue,
             Err(e) => return Html(format!(r#"<div class="card error">Error: {e}</div>"#)),
@@ -348,7 +357,7 @@ async fn shorten_form(
         </div>"##,
         code = short_code,
         base = public_url(),
-        url = req.url,
+        url = url,
         visits = 0,
         plural = "s",
         qr = qr,
@@ -359,9 +368,10 @@ async fn shorten_json(
     State(state): State<SharedState>,
     Json(req): Json<ShortenRequest>,
 ) -> impl IntoResponse {
+    let url = ensure_scheme(&req.url);
     let short_code = loop {
         let code = generate_code();
-        match insert_with_code(&state, &code, &req.url).await {
+        match insert_with_code(&state, &code, &url).await {
             Ok(()) => break code,
             Err(e) if e.contains("UNIQUE") => continue,
             Err(e) => {
@@ -378,7 +388,7 @@ async fn shorten_json(
         StatusCode::CREATED,
         Json(serde_json::json!(ShortenResponse {
             short_code,
-            original_url: req.url,
+            original_url: url,
         })),
     )
         .into_response()
