@@ -323,17 +323,23 @@ pub async fn dashboard(
     };
     let mut resp = match get_all_links_db(&state, creator.clone()).await {
         Ok(links) => {
+            let total_visits: i64 = links.iter().map(|(_, _, v, _)| v).sum();
             let mut rows = String::new();
+            let base = public_url();
             for (short_code, original_url, visits, created_at) in &links {
                 rows.push_str(&format!(
                     r##"<tr>
-                        <td><a href="/{code}" target="_blank">{code}</a></td>
-                        <td class='url-cell'><a href="{url}" target="_blank" title="{url}">{url}</a></td>
-                        <td class='num'>{visits}</td>
-                        <td><a href="/clicks/{code}">view</a></td>
-                        <td>{created}</td>
+                        <td class="code-cell"><a href="/{code}" target="_blank">{code}</a></td>
+                        <td class="url-cell"><a href="{url}" target="_blank" title="{url}">{url}</a></td>
+                        <td class="num">{visits}</td>
+                        <td class="action-cell">
+                          <button class="tbl-copy" onclick="copy('{base}/{code}',this)" title="Copy short URL">⎘</button>
+                          <a href="/clicks/{code}" class="tbl-link">clicks</a>
+                        </td>
+                        <td class="date-cell">{created}</td>
                     </tr>"##,
                     code = short_code,
+                    base = base,
                     url = original_url,
                     visits = visits,
                     created = created_at,
@@ -349,28 +355,36 @@ pub async fn dashboard(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Dashboard · Shrtnr</title>
+  <script src="https://unpkg.com/htmx.org@2"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
   <style>
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
       font-family: 'Inter', system-ui, sans-serif;
-      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      background: #0b1120;
       min-height: 100vh;
       padding: 2rem 1rem;
       color: #e2e8f0;
     }}
+    body::before {{
+      content: ''; position: fixed; inset: 0; z-index: -1;
+      background: radial-gradient(800px circle at 50% 0%, rgba(99,102,241,0.06) 0%, transparent 70%),
+                  radial-gradient(500px circle at 80% 80%, rgba(139,92,246,0.04) 0%, transparent 60%);
+    }}
     .container {{
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 16px;
+      background: rgba(30,41,59,0.7);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(51,65,85,0.5);
+      border-radius: 20px;
       padding: 2rem;
       width: 100%;
-      max-width: 900px;
+      max-width: 960px;
       margin: 0 auto;
-      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.03);
     }}
-    @media (max-width: 500px) {{ .container {{ padding: 1rem; }} }}
+    @media (max-width: 600px) {{ .container {{ padding: 1rem; border-radius: 16px; }} }}
     .header {{
       display: flex;
       align-items: center;
@@ -379,68 +393,177 @@ pub async fn dashboard(
     }}
     .header h1 {{
       font-size: 1.5rem;
-      font-weight: 600;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      background: linear-gradient(135deg, #e2e8f0 0%, #94a3b8 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
     }}
     .header a {{
       color: #818cf8;
       text-decoration: none;
       font-size: 0.875rem;
+      transition: color 0.2s;
     }}
-    .header a:hover {{ text-decoration: underline; }}
-    .count {{ color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem; }}
+    .header a:hover {{ color: #a5b4fc; text-decoration: underline; }}
+    .stats {{
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }}
+    @media (max-width: 500px) {{ .stats {{ flex-direction: column; gap: 0.5rem; }} }}
+    .stat-card {{
+      flex: 1;
+      background: rgba(15,23,42,0.6);
+      border: 1px solid rgba(51,65,85,0.4);
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }}
+    .stat-value {{
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #e2e8f0;
+    }}
+    .stat-label {{
+      font-size: 0.75rem;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748b;
+    }}
     table {{
       width: 100%;
       border-collapse: collapse;
     }}
     th {{
       text-align: left;
-      font-size: 0.75rem;
+      font-size: 0.6875rem;
       font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.06em;
       color: #64748b;
-      padding: 0.75rem 0.5rem;
-      border-bottom: 1px solid #334155;
+      padding: 0.75rem 0.5rem 0.5rem;
+      border-bottom: 1px solid rgba(51,65,85,0.5);
     }}
     td {{
       padding: 0.75rem 0.5rem;
-      border-bottom: 1px solid #1e293b;
+      border-bottom: 1px solid rgba(30,41,59,0.5);
       font-size: 0.875rem;
+      vertical-align: middle;
     }}
-    tr:hover td {{ background: #0f172a40; }}
+    tr:last-child td {{ border-bottom: none; }}
+    tr:hover td {{ background: rgba(15,23,42,0.4); }}
     td a {{ color: #a5b4fc; text-decoration: none; }}
     td a:hover {{ text-decoration: underline; }}
-    .table-wrap {{
-      overflow-x: auto;
-    }}
+    .table-wrap {{ overflow-x: auto; margin: 0 -0.5rem; padding: 0 0.5rem; }}
+    .code-cell {{ white-space: nowrap; font-weight: 500; }}
     .url-cell {{
-      max-width: 300px;
+      max-width: 280px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }}
-    .url-cell a {{ color: #94a3b8; }}
-    .num {{ text-align: right; font-variant-numeric: tabular-nums; color: #e2e8f0; }}
+    .url-cell a {{ color: #94a3b8; font-size: 0.8125rem; }}
+    .date-cell {{ white-space: nowrap; color: #64748b; font-size: 0.8125rem; }}
+    .action-cell {{ white-space: nowrap; }}
+    .num {{ text-align: right; font-variant-numeric: tabular-nums; color: #e2e8f0; font-weight: 500; }}
     .empty {{ text-align: center; padding: 3rem 1rem; color: #64748b; }}
     .empty a {{ color: #818cf8; }}
-    @media (max-width: 600px) {{
-      .url-cell {{ max-width: 120px; }}
+    .tbl-copy {{
+      background: none; border: 1px solid rgba(51,65,85,0.4); color: #64748b;
+      font-size: 0.875rem; padding: 0.125rem 0.375rem; border-radius: 6px;
+      cursor: pointer; transition: all 0.15s; vertical-align: middle; line-height: 1;
+    }}
+    .tbl-copy:hover {{ border-color: rgba(99,102,241,0.3); color: #a5b4fc; background: rgba(99,102,241,0.08); }}
+    .tbl-link {{
+      font-size: 0.8125rem; margin-left: 0.5rem; color: #64748b !important;
+    }}
+    .tbl-link:hover {{ color: #818cf8 !important; }}
+    .toast-container {{
+      position: fixed; top: 1rem; right: 1rem; z-index: 999;
+      display: flex; flex-direction: column; gap: 0.5rem;
+      pointer-events: none;
+    }}
+    .toast {{
+      pointer-events: auto;
+      background: rgba(30,41,59,0.95);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(51,65,85,0.5);
+      border-radius: 10px;
+      padding: 0.75rem 1rem;
+      font-size: 0.875rem;
+      color: #e2e8f0;
+      box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
+      animation: toast-in 0.3s ease, toast-out 0.3s ease 3.7s forwards;
+      max-width: 360px;
+    }}
+    .toast.error {{ border-color: rgba(239,68,68,0.5); }}
+    @keyframes toast-in {{ from {{ opacity: 0; transform: translateX(100%); }} to {{ opacity: 1; transform: translateX(0); }} }}
+    @keyframes toast-out {{ from {{ opacity: 1; }} to {{ opacity: 0; transform: translateX(100%); }} }}
+    @media (max-width: 500px) {{
+      .url-cell {{ max-width: 100px; }}
+      .date-cell {{ display: none; }}
+      th:nth-child(5), td:nth-child(5) {{ display: none; }}
     }}
   </style>
 </head>
 <body>
+  <div class="toast-container" id="toast-container"></div>
   <div class="container">
     <div class="header">
       <h1>Dashboard</h1>
       <a href="/">← Shorten a URL</a>
     </div>
-    <div class="count">{total} link{plural}</div>
+    <div class="stats">
+      <div class="stat-card">
+        <span class="stat-value">{total}</span>
+        <span class="stat-label">Link{plural}</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-value">{total_visits}</span>
+        <span class="stat-label">Total Visits</span>
+      </div>
+    </div>
     {table}
   </div>
+  <script>
+    function copy(url, btn) {{
+      navigator.clipboard.writeText(url);
+      btn.textContent = '✓';
+      btn.style.borderColor = 'rgba(52,211,153,0.4)';
+      btn.style.color = '#34d399';
+      setTimeout(function() {{
+        btn.textContent = '⎘';
+        btn.style.borderColor = '';
+        btn.style.color = '';
+      }}, 1500);
+    }}
+    function showToast(msg, type) {{
+      var c = document.getElementById('toast-container');
+      if (!c) return;
+      var t = document.createElement('div');
+      t.className = 'toast' + (type ? ' ' + type : '');
+      t.textContent = msg;
+      c.appendChild(t);
+      setTimeout(function() {{ if (t.parentNode) t.parentNode.removeChild(t); }}, 4200);
+    }}
+    document.body.addEventListener('htmx:beforeSwap', function(evt) {{
+      if (evt.detail.xhr && evt.detail.xhr.status >= 400) {{
+        showToast(evt.detail.serverResponse || 'Request failed', 'error');
+        evt.detail.shouldSwap = false;
+      }}
+    }});
+  </script>
 </body>
 </html>"##,
                 total = links.len(),
                 plural = plural,
+                total_visits = total_visits,
                 table = if links.is_empty() {
                     r##"<div class='empty'>No links yet. <a href='/'>Create one →</a></div>"##.to_string()
                 } else {
@@ -450,7 +573,7 @@ pub async fn dashboard(
                                 <th>Short code</th>
                                 <th>Original URL</th>
                                 <th class='num'>Visits</th>
-                                <th>Clicks</th>
+                                <th>Actions</th>
                                 <th>Created</th>
                             </tr></thead>
                             <tbody>{rows}</tbody>
@@ -526,59 +649,77 @@ pub async fn clicks(
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{
       font-family: 'Inter', system-ui, sans-serif;
-      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      background: #0b1120;
       min-height: 100vh;
       padding: 2rem 1rem;
       color: #e2e8f0;
     }}
+    body::before {{
+      content: ''; position: fixed; inset: 0; z-index: -1;
+      background: radial-gradient(600px circle at 50% 0%, rgba(99,102,241,0.06) 0%, transparent 70%);
+    }}
     .container {{
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 16px;
+      background: rgba(30,41,59,0.7);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(51,65,85,0.5);
+      border-radius: 20px;
       padding: 2rem;
       width: 100%;
-      max-width: 900px;
+      max-width: 960px;
       margin: 0 auto;
-      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.03);
     }}
-    @media (max-width: 500px) {{ .container {{ padding: 1rem; }} }}
+    @media (max-width: 600px) {{ .container {{ padding: 1rem; border-radius: 16px; }} }}
     .header {{
       display: flex;
       align-items: center;
       justify-content: space-between;
       margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+      gap: 0.5rem;
     }}
-    .header h1 {{ font-size: 1.5rem; font-weight: 600; }}
+    .header h1 {{
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }}
     .header a {{ color: #818cf8; text-decoration: none; font-size: 0.875rem; }}
     .header a:hover {{ text-decoration: underline; }}
-    .count {{ color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem; }}
+    .count {{ color: #64748b; font-size: 0.875rem; margin-bottom: 1rem; }}
     .table-wrap {{ overflow-x: auto; }}
     table {{ width: 100%; border-collapse: collapse; }}
     th {{
       text-align: left;
-      font-size: 0.75rem;
+      font-size: 0.6875rem;
       font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.06em;
       color: #64748b;
-      padding: 0.75rem 0.5rem;
-      border-bottom: 1px solid #334155;
+      padding: 0.75rem 0.5rem 0.5rem;
+      border-bottom: 1px solid rgba(51,65,85,0.5);
     }}
     td {{
       padding: 0.75rem 0.5rem;
-      border-bottom: 1px solid #1e293b;
+      border-bottom: 1px solid rgba(30,41,59,0.5);
       font-size: 0.8125rem;
+      vertical-align: middle;
     }}
-    tr:hover td {{ background: #0f172a40; }}
-    .cell-small {{ max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    tr:last-child td {{ border-bottom: none; }}
+    tr:hover td {{ background: rgba(15,23,42,0.4); }}
+    .cell-small {{ max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
     .empty {{ text-align: center; padding: 3rem 1rem; color: #64748b; }}
+    @media (max-width: 500px) {{
+      td:nth-child(2), th:nth-child(2) {{ display: none; }}
+      td:nth-child(4), th:nth-child(4) {{ display: none; }}
+    }}
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
-      <h1>Clicks · {code}</h1>
-      <a href="/dashboard">← Dashboard</a>
+      <h1>Clicks &middot; {code}</h1>
+      <a href="/dashboard">&larr; Dashboard</a>
     </div>
     <div class="count">{visits} click{plural}</div>
     {table}
