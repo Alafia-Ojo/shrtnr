@@ -5,6 +5,13 @@ pub struct ShortenRequest {
     pub url: String,
     #[serde(default)]
     pub code: Option<String>,
+    #[serde(default)]
+    pub creator_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct DashboardQuery {
+    pub admin_token: Option<String>,
 }
 
 #[derive(Serialize)]

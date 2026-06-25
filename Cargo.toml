@@ -15,5 +15,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 nanoid = "0.4"
-qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg", "image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 attohttpc = { version = "0.28", default-features = false, features = ["tls-rustls"] }
+dotenvy = "0.15"

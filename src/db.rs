@@ -21,13 +21,23 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_short_code ON links(short_code);
         CREATE INDEX IF NOT EXISTS idx_click_short_code ON click_events(short_code);",
     )?;
+    // migrate: add creator_id column for per-user link isolation
+    let _ = conn.execute(
+        "ALTER TABLE links ADD COLUMN creator_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     Ok(())
 }
 
-pub fn insert_link(conn: &Connection, short_code: &str, original_url: &str) -> Result<()> {
+pub fn insert_link(
+    conn: &Connection,
+    short_code: &str,
+    original_url: &str,
+    creator_id: &str,
+) -> Result<()> {
     conn.execute(
-        "INSERT INTO links (short_code, original_url) VALUES (?1, ?2)",
-        params![short_code, original_url],
+        "INSERT INTO links (short_code, original_url, creator_id) VALUES (?1, ?2, ?3)",
+        params![short_code, original_url, creator_id],
     )?;
     Ok(())
 }
@@ -80,16 +90,36 @@ pub fn get_clicks(
     Ok(clicks)
 }
 
-pub fn get_all_links(conn: &Connection) -> Result<Vec<(String, String, i64, String)>> {
-    let mut stmt = conn.prepare(
-        "SELECT short_code, original_url, visits, created_at FROM links ORDER BY created_at DESC",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-    })?;
-    let mut links = Vec::new();
-    for row in rows {
-        links.push(row?);
+pub fn get_all_links(
+    conn: &Connection,
+    creator_id: Option<&str>,
+) -> Result<Vec<(String, String, i64, String)>> {
+    match creator_id {
+        Some(id) if !id.is_empty() => {
+            let mut stmt = conn.prepare(
+                "SELECT short_code, original_url, visits, created_at FROM links WHERE creator_id = ?1 ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map(params![id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            let mut links = Vec::new();
+            for row in rows {
+                links.push(row?);
+            }
+            Ok(links)
+        }
+        _ => {
+            let mut stmt = conn.prepare(
+                "SELECT short_code, original_url, visits, created_at FROM links ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            let mut links = Vec::new();
+            for row in rows {
+                links.push(row?);
+            }
+            Ok(links)
+        }
     }
-    Ok(links)
 }
