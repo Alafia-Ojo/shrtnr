@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub struct ShortenRequest {
     pub url: String,
+    #[serde(default)]
+    pub code: Option<String>,
 }
 
 #[derive(Serialize)]

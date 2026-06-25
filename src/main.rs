@@ -11,20 +11,25 @@ use axum::{
 use models::*;
 use qrcode::QrCode;
 use qrcode::render::svg;
+use r2d2_sqlite::SqliteConnectionManager;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
 const SHORT_CODE_LEN: usize = 7;
 
-fn qr_svg(short_code: &str) -> String {
+fn qr_svg(short_code: &str) -> std::result::Result<String, String> {
     let url = format!("{}/{short_code}", public_url());
-    let code = QrCode::new(url.as_bytes()).unwrap();
-    code.render::<svg::Color>()
+    let code =
+        QrCode::new(url.as_bytes()).map_err(|e| format!("failed to generate QR code: {e}"))?;
+    Ok(code
+        .render::<svg::Color>()
         .dark_color(svg::Color("#0f172a"))
         .light_color(svg::Color("#e2e8f0"))
         .min_dimensions(6, 6)
-        .build()
+        .build())
 }
 
 fn public_url() -> String {
@@ -39,6 +44,24 @@ fn ensure_scheme(url: &str) -> String {
     }
 }
 
+fn validate_custom_code(code: &str) -> std::result::Result<(), String> {
+    if code.len() < 3 {
+        return Err("custom code must be at least 3 characters".into());
+    }
+    if code.len() > 20 {
+        return Err("custom code must be 20 characters or less".into());
+    }
+    if !code
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(
+            "custom code can only contain letters, numbers, hyphens, and underscores".into(),
+        );
+    }
+    Ok(())
+}
+
 fn generate_code() -> String {
     nanoid::nanoid!(SHORT_CODE_LEN)
 }
@@ -48,52 +71,77 @@ async fn insert_with_code(
     code: &str,
     url: &str,
 ) -> std::result::Result<(), String> {
-    let state = state.clone();
+    let pool = state.pool.clone();
     let code = code.to_owned();
     let url = url.to_owned();
     tokio::task::spawn_blocking(move || {
-        let conn = state.conn.lock().unwrap();
-        db::insert_link(&conn, &code, &url)
+        let conn = pool.get().map_err(|e| e.to_string())?;
+        db::insert_link(&conn, &code, &url).map_err(|e| e.to_string())
     })
     .await
-    .unwrap()
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("internal error: {e}"))?
 }
 
 async fn get_link_db(
     state: &SharedState,
     code: &str,
 ) -> std::result::Result<Option<(String, i64)>, String> {
-    let state = state.clone();
+    let pool = state.pool.clone();
     let code = code.to_owned();
     tokio::task::spawn_blocking(move || {
-        let conn = state.conn.lock().unwrap();
-        db::get_link(&conn, &code)
+        let conn = pool.get().map_err(|e| e.to_string())?;
+        db::get_link(&conn, &code).map_err(|e| e.to_string())
     })
     .await
-    .unwrap()
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("internal error: {e}"))?
 }
 
 async fn get_all_links_db(
     state: &SharedState,
 ) -> std::result::Result<Vec<(String, String, i64, String)>, String> {
-    let state = state.clone();
+    let pool = state.pool.clone();
     tokio::task::spawn_blocking(move || {
-        let conn = state.conn.lock().unwrap();
-        db::get_all_links(&conn)
+        let conn = pool.get().map_err(|e| e.to_string())?;
+        db::get_all_links(&conn).map_err(|e| e.to_string())
     })
     .await
-    .unwrap()
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("internal error: {e}"))?
+}
+
+fn log_click_db(state: &SharedState, short_code: &str, referrer: &str, user_agent: &str, ip: &str) {
+    let pool = state.pool.clone();
+    let short_code = short_code.to_owned();
+    let referrer = referrer.to_owned();
+    let user_agent = user_agent.to_owned();
+    let ip = ip.to_owned();
+    tokio::task::spawn_blocking(move || {
+        if let Ok(conn) = pool.get() {
+            let _ = db::log_click(&conn, &short_code, &referrer, &user_agent, &ip);
+        }
+    });
+}
+
+async fn get_clicks_db(
+    state: &SharedState,
+    short_code: &str,
+) -> std::result::Result<Vec<(String, String, String, String)>, String> {
+    let pool = state.pool.clone();
+    let short_code = short_code.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| e.to_string())?;
+        db::get_clicks(&conn, &short_code).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("internal error: {e}"))?
 }
 
 fn increment_visits_db(state: &SharedState, code: &str) {
-    let state = state.clone();
+    let pool = state.pool.clone();
     let code = code.to_owned();
     tokio::task::spawn_blocking(move || {
-        let conn = state.conn.lock().unwrap();
-        let _ = db::increment_visits(&conn, &code);
+        if let Ok(conn) = pool.get() {
+            let _ = db::increment_visits(&conn, &code);
+        }
     });
 }
 
@@ -103,7 +151,14 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>URL Shortener</title>
-  <script src="https://unpkg.com/htmx.org@2"></script>
+    <script src="https://unpkg.com/htmx.org@2"></script>
+    <script>
+      function copy(url, btn) {
+        navigator.clipboard.writeText(url);
+        btn.textContent = 'copied';
+        setTimeout(() => btn.textContent = 'copy', 1500);
+      }
+    </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
   <style>
@@ -152,6 +207,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       flex-direction: column;
       gap: 0.5rem;
     }
+    .input-group + .input-group { margin-top: 1rem; }
     label {
       font-size: 0.875rem;
       font-weight: 500;
@@ -215,6 +271,21 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       text-decoration: none;
     }
     .card .short-url a:hover { text-decoration: underline; }
+    .card .short-url { display: flex; align-items: center; gap: 0.5rem; }
+    .copy-btn {
+      background: #334155;
+      border: none;
+      color: #94a3b8;
+      font-size: 0.6875rem;
+      font-family: inherit;
+      font-weight: 500;
+      padding: 0.25rem 0.5rem;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    .copy-btn:hover { background: #475569; color: #e2e8f0; }
     .card .meta {
       margin-top: 0.75rem;
       font-size: 0.8125rem;
@@ -250,6 +321,21 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
       color: #475569;
     }
     .footer a { color: #6366f1; text-decoration: none; }
+    .optional { color: #64748b; font-weight: 400; }
+    .code-input {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      font-size: 0.9375rem;
+      font-family: inherit;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      color: #e2e8f0;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .code-input:focus { border-color: #6366f1; }
+    .code-input::placeholder { color: #475569; }
     .qr-wrap {
       display: flex;
       justify-content: center;
@@ -282,6 +368,10 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
           <button type='submit'>Shorten</button>
         </div>
       </div>
+      <div class='input-group'>
+        <label for='code'>Custom code <span class='optional'>(optional)</span></label>
+        <input class='code-input' type='text' id='code' name='code' placeholder='my-custom-link' maxlength='20'>
+      </div>
     </form>
     <div id='result'></div>
     <div class='footer'><a href='/dashboard'>Dashboard</a> · Powered by <a href='https://www.rust-lang.org/'>Rust</a> + <a href='https://htmx.org/'>HTMX</a></div>
@@ -289,8 +379,12 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
 </body>
 </html>"##;
 
+const RATE_LIMIT_REQUESTS: usize = 10;
+const RATE_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
 struct AppState {
-    conn: Mutex<rusqlite::Connection>,
+    pool: r2d2::Pool<SqliteConnectionManager>,
+    rate_limiter: Mutex<HashMap<String, Vec<Instant>>>,
 }
 
 type SharedState = Arc<AppState>;
@@ -302,17 +396,26 @@ async fn main() {
         .init();
 
     let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "urlshort.db".into());
-    let conn = db::init_db(&db_path).expect("failed to initialize database");
+    let manager = SqliteConnectionManager::file(db_path);
+    let pool = r2d2::Pool::builder()
+        .max_size(8)
+        .build(manager)
+        .expect("failed to create database pool");
+    db::init_schema(&pool.get().expect("failed to get initial connection"))
+        .expect("failed to initialize database schema");
     let state = Arc::new(AppState {
-        conn: Mutex::new(conn),
+        pool,
+        rate_limiter: Mutex::new(HashMap::new()),
     });
 
     let app = Router::new()
         .route("/", get(index))
+        .route("/health", get(health))
         .route("/shorten", post(shorten_form))
         .route("/api/shorten", post(shorten_json))
         .route("/dashboard", get(dashboard))
         .route("/stats/{short_code}", get(stats))
+        .route("/clicks/{short_code}", get(clicks))
         .route("/qr/{short_code}", get(qr_code))
         .route("/{short_code}", get(redirect))
         .layer(CorsLayer::permissive())
@@ -321,8 +424,63 @@ async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
     let addr = format!("0.0.0.0:{port}");
     tracing::info!("listening on {addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
+        .expect("failed to bind to address {addr}");
+    axum::serve(listener, app).await.expect("server failed");
+}
+
+fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn check_rate_limit(state: &SharedState, ip: &str) -> std::result::Result<(), String> {
+    let now = Instant::now();
+    let mut limiter = state
+        .rate_limiter
+        .lock()
+        .map_err(|_| "internal error: rate limiter unavailable".to_string())?;
+    let timestamps = limiter.entry(ip.to_owned()).or_default();
+
+    timestamps.retain(|t| now.duration_since(*t) < RATE_LIMIT_WINDOW);
+
+    if timestamps.len() >= RATE_LIMIT_REQUESTS {
+        return Err("rate limit exceeded. try again later.".into());
+    }
+
+    timestamps.push(now);
+    Ok(())
+}
+
+async fn validate_url(url: &str) -> std::result::Result<(), String> {
+    let url = url.to_owned();
+    tokio::task::spawn_blocking(move || {
+        attohttpc::head(&url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .map_err(|_| "unable to reach URL. check that it exists.".to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("internal error: {e}"))?
+}
+
+async fn health(State(state): State<SharedState>) -> impl IntoResponse {
+    let db_ok = state.pool.get().is_ok();
+    let status = if db_ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(serde_json::json!({ "status": if db_ok { "ok" } else { "degraded" } })),
+    )
 }
 
 async fn index() -> Html<&'static str> {
@@ -331,28 +489,62 @@ async fn index() -> Html<&'static str> {
 
 async fn shorten_form(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Form(req): Form<ShortenRequest>,
 ) -> Html<String> {
+    let ip = client_ip(&headers);
+    if let Err(e) = check_rate_limit(&state, &ip) {
+        return Html(format!(r#"<div class="card error">{e}</div>"#));
+    }
+
     let url = ensure_scheme(&req.url);
-    let short_code = loop {
-        let code = generate_code();
-        match insert_with_code(&state, &code, &url).await {
-            Ok(()) => break code,
-            Err(e) if e.contains("UNIQUE") => continue,
-            Err(e) => return Html(format!(r#"<div class="card error">Error: {e}</div>"#)),
+
+    if let Err(e) = validate_url(&url).await {
+        return Html(format!(r#"<div class="card error">{e}</div>"#));
+    }
+    let short_code = match req.code.as_deref().and_then(|c| {
+        let t = c.trim();
+        if t.is_empty() { None } else { Some(t) }
+    }) {
+        Some(trimmed) => {
+            if let Err(e) = validate_custom_code(trimmed) {
+                return Html(format!(r#"<div class="card error">{e}</div>"#));
+            }
+            match insert_with_code(&state, trimmed, &url).await {
+                Ok(()) => trimmed.to_owned(),
+                Err(e) if e.contains("UNIQUE") => {
+                    return Html(r#"<div class="card error">custom code already taken</div>"#.into());
+                }
+                Err(e) => return Html(format!(r#"<div class="card error">Error: {e}</div>"#)),
+            }
+        }
+        None => {
+            loop {
+                let code = generate_code();
+                match insert_with_code(&state, &code, &url).await {
+                    Ok(()) => break code,
+                    Err(e) if e.contains("UNIQUE") => continue,
+                    Err(e) => return Html(format!(r#"<div class="card error">Error: {e}</div>"#)),
+                }
+            }
         }
     };
 
-    let qr = qr_svg(&short_code);
+    let qr = match qr_svg(&short_code) {
+        Ok(svg) => svg,
+        Err(e) => return Html(format!(r#"<div class="card error">{e}</div>"#)),
+    };
     Html(format!(
         r##"<div class="card">
-            <div class="short-url"><a href="/{code}" target="_blank">{base}/{code}</a></div>
+            <div class="short-url"><a href="/{code}" target="_blank">{base}/{code}</a> <button class='copy-btn' onclick="copy('{base}/{code}', this)">copy</button></div>
             <div class="original-link"><a href="{url}" target="_blank">{url}</a></div>
             <div class='qr-wrap'>{qr}</div>
             <div class="meta">
                 <span>{visits} visit{plural}</span>
                 <span class='sep'>·</span>
                 <a href='#' hx-get='/stats/{code}' hx-target='closest .card' hx-swap='outerHTML'>refresh</a>
+                <span class='sep'>·</span>
+                <a href='/clicks/{code}'>clicks</a>
             </div>
         </div>"##,
         code = short_code,
@@ -366,20 +558,74 @@ async fn shorten_form(
 
 async fn shorten_json(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(req): Json<ShortenRequest>,
 ) -> impl IntoResponse {
+    let ip = client_ip(&headers);
+    if let Err(e) = check_rate_limit(&state, &ip) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!(ErrorResponse { error: e })),
+        )
+            .into_response();
+    }
+
     let url = ensure_scheme(&req.url);
-    let short_code = loop {
-        let code = generate_code();
-        match insert_with_code(&state, &code, &url).await {
-            Ok(()) => break code,
-            Err(e) if e.contains("UNIQUE") => continue,
-            Err(e) => {
+
+    if let Err(e) = validate_url(&url).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!(ErrorResponse { error: e })),
+        )
+            .into_response();
+    }
+
+    let short_code = match req.code.as_deref().and_then(|c| {
+        let t = c.trim();
+        if t.is_empty() { None } else { Some(t) }
+    }) {
+        Some(trimmed) => {
+            if let Err(e) = validate_custom_code(trimmed) {
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    StatusCode::BAD_REQUEST,
                     Json(serde_json::json!(ErrorResponse { error: e })),
                 )
                     .into_response();
+            }
+            match insert_with_code(&state, trimmed, &url).await {
+                Ok(()) => trimmed.to_owned(),
+                Err(e) if e.contains("UNIQUE") => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(serde_json::json!(ErrorResponse {
+                            error: "custom code already taken".into()
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!(ErrorResponse { error: e })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        None => {
+            loop {
+                let code = generate_code();
+                match insert_with_code(&state, &code, &url).await {
+                    Ok(()) => break code,
+                    Err(e) if e.contains("UNIQUE") => continue,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!(ErrorResponse { error: e })),
+                        )
+                            .into_response();
+                    }
+                }
             }
         }
     };
@@ -396,10 +642,21 @@ async fn shorten_json(
 
 async fn redirect(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Path(short_code): Path<String>,
 ) -> impl IntoResponse {
     match get_link_db(&state, &short_code).await {
         Ok(Some((url, _))) => {
+            let referrer = headers
+                .get("referer")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let user_agent = headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let ip = client_ip(&headers);
+            log_click_db(&state, &short_code, referrer, user_agent, &ip);
             increment_visits_db(&state, &short_code);
             Redirect::temporary(&url).into_response()
         }
@@ -423,17 +680,21 @@ async fn qr_code(
     Path(short_code): Path<String>,
 ) -> impl IntoResponse {
     match get_link_db(&state, &short_code).await {
-        Ok(Some(_)) => {
-            let svg_str = qr_svg(&short_code);
-            (
+        Ok(Some(_)) => match qr_svg(&short_code) {
+            Ok(svg_str) => (
                 [(
                     axum::http::header::CONTENT_TYPE,
                     "image/svg+xml; charset=utf-8",
                 )],
                 svg_str,
             )
-                .into_response()
-        }
+                .into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!(ErrorResponse { error: e })),
+            )
+                .into_response(),
+        },
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!(ErrorResponse {
@@ -449,9 +710,7 @@ async fn qr_code(
     }
 }
 
-async fn dashboard(
-    State(state): State<SharedState>,
-) -> impl IntoResponse {
+async fn dashboard(State(state): State<SharedState>) -> impl IntoResponse {
     match get_all_links_db(&state).await {
         Ok(links) => {
             let mut rows = String::new();
@@ -461,6 +720,7 @@ async fn dashboard(
                         <td><a href="/{code}" target="_blank">{code}</a></td>
                         <td class='url-cell'><a href="{url}" target="_blank" title="{url}">{url}</a></td>
                         <td class='num'>{visits}</td>
+                        <td><a href="/clicks/{code}">view</a></td>
                         <td>{created}</td>
                     </tr>"##,
                     code = short_code,
@@ -580,6 +840,7 @@ async fn dashboard(
                                 <th>Short code</th>
                                 <th>Original URL</th>
                                 <th class='num'>Visits</th>
+                                <th>Clicks</th>
                                 <th>Created</th>
                             </tr></thead>
                             <tbody>{rows}</tbody>
@@ -597,6 +858,139 @@ async fn dashboard(
     }
 }
 
+async fn clicks(
+    State(state): State<SharedState>,
+    Path(short_code): Path<String>,
+) -> impl IntoResponse {
+    let visits = match get_link_db(&state, &short_code).await {
+        Ok(Some((_, v))) => v,
+        Ok(None) => {
+            return Html(
+                r##"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Not found</title><style>body{font-family:system-ui;background:#0f172a;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#e2e8f0;}</style></head><body><p>Link not found. <a href="/dashboard" style="color:#818cf8">Go to dashboard</a></p></body></html>"##,
+            )
+            .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Html(format!("<div class='card error'>Error: {e}</div>")),
+            )
+                .into_response();
+        }
+    };
+
+    let clicks_list = get_clicks_db(&state, &short_code).await.unwrap_or_default();
+
+    let mut rows = String::new();
+    for (referrer, user_agent, ip, clicked_at) in &clicks_list {
+        rows.push_str(&format!(
+            r##"<tr>
+                        <td class='cell-small' title="{ua}">{ua}</td>
+                        <td class='cell-small'>{ref}</td>
+                        <td class='cell-small'>{ip}</td>
+                        <td class='cell-small'>{at}</td>
+                    </tr>"##,
+            ua = user_agent,
+            ref = referrer,
+            ip = ip,
+            at = clicked_at,
+        ));
+    }
+
+    Html(format!(
+                r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clicks · {code} · Shrtnr</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      font-family: 'Inter', system-ui, sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+      color: #e2e8f0;
+    }}
+    .container {{
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 16px;
+      padding: 2rem;
+      width: 100%;
+      max-width: 900px;
+      margin: 0 auto;
+      box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+    }}
+    @media (max-width: 500px) {{ .container {{ padding: 1rem; }} }}
+    .header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 1.5rem;
+    }}
+    .header h1 {{ font-size: 1.5rem; font-weight: 600; }}
+    .header a {{ color: #818cf8; text-decoration: none; font-size: 0.875rem; }}
+    .header a:hover {{ text-decoration: underline; }}
+    .count {{ color: #94a3b8; font-size: 0.875rem; margin-bottom: 1rem; }}
+    .table-wrap {{ overflow-x: auto; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th {{
+      text-align: left;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #64748b;
+      padding: 0.75rem 0.5rem;
+      border-bottom: 1px solid #334155;
+    }}
+    td {{
+      padding: 0.75rem 0.5rem;
+      border-bottom: 1px solid #1e293b;
+      font-size: 0.8125rem;
+    }}
+    tr:hover td {{ background: #0f172a40; }}
+    .cell-small {{ max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .empty {{ text-align: center; padding: 3rem 1rem; color: #64748b; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Clicks · {code}</h1>
+      <a href="/dashboard">← Dashboard</a>
+    </div>
+    <div class="count">{visits} click{plural}</div>
+    {table}
+  </div>
+</body>
+</html>"##,
+                code = short_code,
+                visits = visits,
+                plural = if visits == 1 { "" } else { "s" },
+                table = if clicks_list.is_empty() {
+                    r##"<div class='empty'>No clicks yet. Share your link!</div>"##.to_string()
+                } else {
+                    format!(
+                        r##"<div class="table-wrap"><table>
+                            <thead><tr>
+                                <th>User agent</th>
+                                <th>Referrer</th>
+                                <th>IP</th>
+                                <th>Time</th>
+                            </tr></thead>
+                            <tbody>{rows}</tbody>
+                        </table></div>"##
+                    )
+                },
+            ))
+            .into_response()
+}
+
 async fn stats(
     State(state): State<SharedState>,
     Path(short_code): Path<String>,
@@ -606,26 +1000,30 @@ async fn stats(
     match get_link_db(&state, &short_code).await {
         Ok(Some((original_url, visits))) => {
             if is_htmx {
-                let qr = qr_svg(&short_code);
-                Html(format!(
-                    r##"<div class="card">
-                        <div class="short-url"><a href="/{code}" target="_blank">{base}/{code}</a></div>
-                        <div class="original-link"><a href="{url}" target="_blank">{url}</a></div>
-                        <div class='qr-wrap'>{qr}</div>
-                        <div class="meta">
-                            <span>{visits} visit{plural}</span>
-                            <span class='sep'>·</span>
-                            <a href='#' hx-get='/stats/{code}' hx-target='closest .card' hx-swap='outerHTML'>refresh</a>
-                        </div>
-                    </div>"##,
-                    code = short_code,
-                    base = public_url(),
-                    url = original_url,
-                    visits = visits,
-                    plural = if visits == 1 { "" } else { "s" },
-                    qr = qr,
-                ))
-                .into_response()
+                match qr_svg(&short_code) {
+                    Ok(qr) => Html(format!(
+                        r##"<div class="card">
+                            <div class="short-url"><a href="/{code}" target="_blank">{base}/{code}</a> <button class='copy-btn' onclick="copy('{base}/{code}', this)">copy</button></div>
+                            <div class="original-link"><a href="{url}" target="_blank">{url}</a></div>
+                            <div class='qr-wrap'>{qr}</div>
+                            <div class="meta">
+                                <span>{visits} visit{plural}</span>
+                                <span class='sep'>·</span>
+                                <a href='#' hx-get='/stats/{code}' hx-target='closest .card' hx-swap='outerHTML'>refresh</a>
+                                <span class='sep'>·</span>
+                                <a href='/clicks/{code}'>clicks</a>
+                            </div>
+                        </div>"##,
+                        code = short_code,
+                        base = public_url(),
+                        url = original_url,
+                        visits = visits,
+                        plural = if visits == 1 { "" } else { "s" },
+                        qr = qr,
+                    ))
+                    .into_response(),
+                    Err(e) => Html(format!("<div class='card error'>{e}</div>")).into_response(),
+                }
             } else {
                 Json(serde_json::json!(StatsResponse {
                     short_code,
