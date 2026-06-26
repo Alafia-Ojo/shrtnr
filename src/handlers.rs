@@ -10,9 +10,10 @@ use crate::qr::{qr_png_bytes, qr_svg};
 use crate::state::SharedState;
 use crate::templates::INDEX_HTML;
 use crate::util::{
-    check_rate_limit, client_ip, ensure_scheme, generate_code, get_all_links_db, get_clicks_db,
-    get_link_db, get_or_create_creator_id, increment_visits_db, insert_with_code, log_click_db,
-    public_url, validate_custom_code, validate_url,
+    check_rate_limit, client_ip, delete_link_db, ensure_scheme, generate_code, get_all_links_db,
+    get_clicks_db, get_link_creator_db, get_link_db, get_or_create_creator_id,
+    increment_visits_db, insert_with_code, log_click_db, parse_expiry, public_url,
+    validate_custom_code, validate_url,
 };
 
 pub async fn health(State(state): State<SharedState>) -> impl IntoResponse {
@@ -57,6 +58,7 @@ pub async fn shorten_form(
         Some(id) => id.to_owned(),
         None => get_or_create_creator_id(&headers),
     };
+    let expires_hours = req.expiry.as_deref().and_then(parse_expiry);
     let short_code = match req.code.as_deref().and_then(|c| {
         let t = c.trim();
         if t.is_empty() { None } else { Some(t) }
@@ -65,7 +67,7 @@ pub async fn shorten_form(
             if let Err(e) = validate_custom_code(trimmed) {
                 return Html(format!(r#"<div class="card error">{e}</div>"#));
             }
-            match insert_with_code(&state, trimmed, &url, &creator_id).await {
+            match insert_with_code(&state, trimmed, &url, &creator_id, expires_hours).await {
                 Ok(()) => trimmed.to_owned(),
                 Err(e) if e.contains("UNIQUE") => {
                     return Html(
@@ -77,7 +79,7 @@ pub async fn shorten_form(
         }
         None => loop {
             let code = generate_code();
-            match insert_with_code(&state, &code, &url, &creator_id).await {
+            match insert_with_code(&state, &code, &url, &creator_id, expires_hours).await {
                 Ok(()) => break code,
                 Err(e) if e.contains("UNIQUE") => continue,
                 Err(e) => return Html(format!(r#"<div class="card error">Error: {e}</div>"#)),
@@ -140,6 +142,7 @@ pub async fn shorten_json(
         Some(id) => id.to_owned(),
         None => get_or_create_creator_id(&headers),
     };
+    let expires_hours = req.expiry.as_deref().and_then(parse_expiry);
     let short_code = match req.code.as_deref().and_then(|c| {
         let t = c.trim();
         if t.is_empty() { None } else { Some(t) }
@@ -152,7 +155,7 @@ pub async fn shorten_json(
                 )
                     .into_response();
             }
-            match insert_with_code(&state, trimmed, &url, &creator_id).await {
+            match insert_with_code(&state, trimmed, &url, &creator_id, expires_hours).await {
                 Ok(()) => trimmed.to_owned(),
                 Err(e) if e.contains("UNIQUE") => {
                     return (
@@ -174,7 +177,7 @@ pub async fn shorten_json(
         }
         None => loop {
             let code = generate_code();
-            match insert_with_code(&state, &code, &url, &creator_id).await {
+            match insert_with_code(&state, &code, &url, &creator_id, expires_hours).await {
                 Ok(()) => break code,
                 Err(e) if e.contains("UNIQUE") => continue,
                 Err(e) => {
@@ -204,7 +207,14 @@ pub async fn redirect(
     Path(short_code): Path<String>,
 ) -> impl IntoResponse {
     match get_link_db(&state, &short_code).await {
-        Ok(Some((url, _))) => {
+        Ok(Some((url, _, _, is_expired))) => {
+            if is_expired {
+                return (
+                    StatusCode::GONE,
+                    Html(r##"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Link expired</title><style>body{font-family:system-ui;background:#0b1120;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#e2e8f0;text-align:center;padding:1rem;}</style></head><body><div><h1 style="font-size:1.5rem;margin-bottom:0.5rem;">This link has expired</h1><p style="color:#64748b;">The link you followed is no longer available.</p><p style="margin-top:1rem;"><a href="/" style="color:#818cf8;">Create a new short link</a></p></div></body></html>"##),
+                )
+                    .into_response();
+            }
             let referrer = headers
                 .get("referer")
                 .and_then(|v| v.to_str().ok())
@@ -316,6 +326,7 @@ pub async fn dashboard(
         .as_deref()
         .map(|t| t == state.admin_token)
         .unwrap_or(false);
+    let admin_token_str = query.admin_token.as_deref().unwrap_or_default().to_owned();
     let creator = if is_admin {
         None
     } else {
@@ -323,10 +334,21 @@ pub async fn dashboard(
     };
     let mut resp = match get_all_links_db(&state, creator.clone()).await {
         Ok(links) => {
-            let total_visits: i64 = links.iter().map(|(_, _, v, _)| v).sum();
+            let total_visits: i64 = links.iter().map(|(_, _, v, _, _, _)| v).sum();
             let mut rows = String::new();
             let base = public_url();
-            for (short_code, original_url, visits, created_at) in &links {
+            for (short_code, original_url, visits, created_at, expires_at, is_expired) in &links {
+                let expiry = match (expires_at, is_expired) {
+                    (Some(date), false) => format!("exp. {}", date),
+                    (Some(_), true) => "expired".to_owned(),
+                    (None, _) => "never".to_owned(),
+                };
+                let qr = qr_svg(short_code).unwrap_or_default();
+                let del_url = if is_admin {
+                    format!("/delete/{short_code}?admin_token={admin_token_str}")
+                } else {
+                    format!("/delete/{short_code}")
+                };
                 rows.push_str(&format!(
                     r##"<tr>
                         <td class="code-cell"><a href="/{code}" target="_blank">{code}</a></td>
@@ -337,12 +359,19 @@ pub async fn dashboard(
                           <a href="/clicks/{code}" class="tbl-link">clicks</a>
                         </td>
                         <td class="date-cell">{created}</td>
+                        <td class="qr-cell"><a href="/qr/{code}/png" target="_blank" title="Download QR PNG">{qr}</a></td>
+                        <td class="expiry-cell{expired_cls}">{expiry}</td>
+                        <td class="del-cell"><button class="delete-btn" hx-delete="{del_url}" hx-target="closest tr" hx-swap="delete" hx-confirm="Delete this link?">✕</button></td>
                     </tr>"##,
                     code = short_code,
                     base = base,
                     url = original_url,
                     visits = visits,
                     created = created_at,
+                    expiry = expiry,
+                    qr = qr,
+                    del_url = del_url,
+                    expired_cls = if *is_expired { " expired" } else { "" },
                 ));
             }
 
@@ -474,6 +503,12 @@ pub async fn dashboard(
     .num {{ text-align: right; font-variant-numeric: tabular-nums; color: #e2e8f0; font-weight: 500; }}
     .empty {{ text-align: center; padding: 3rem 1rem; color: #64748b; }}
     .empty a {{ color: #818cf8; }}
+    .expiry-cell {{ white-space: nowrap; color: #64748b; font-size: 0.75rem; }}
+    .expiry-cell.expired {{ color: #f87171; font-weight: 500; }}
+    .qr-cell {{ padding: 0.25rem 0.5rem !important; text-align: center; }}
+    .qr-cell a {{ display: inline-block; }}
+    .qr-cell svg {{ display: block; width: 36px; height: 36px; border-radius: 4px; background: #e2e8f0; padding: 3px; transition: transform 0.15s; }}
+    .qr-cell a:hover svg {{ transform: scale(1.15); }}
     .tbl-copy {{
       background: none; border: 1px solid rgba(51,65,85,0.4); color: #64748b;
       font-size: 0.875rem; padding: 0.125rem 0.375rem; border-radius: 6px;
@@ -484,6 +519,14 @@ pub async fn dashboard(
       font-size: 0.8125rem; margin-left: 0.5rem; color: #64748b !important;
     }}
     .tbl-link:hover {{ color: #818cf8 !important; }}
+    .delete-btn {{
+      background: none; border: 1px solid rgba(239,68,68,0.3); color: #f87171;
+      font-size: 0.75rem; padding: 0.125rem 0.375rem; border-radius: 6px;
+      cursor: pointer; transition: all 0.15s; vertical-align: middle; line-height: 1;
+      margin-left: 0.25rem;
+    }}
+    .delete-btn:hover {{ border-color: rgba(239,68,68,0.6); color: #fca5a5; background: rgba(239,68,68,0.1); }}
+    .del-cell {{ text-align: center; padding-left: 0.25rem; padding-right: 0.25rem; }}
     .toast-container {{
       position: fixed; top: 1rem; right: 1rem; z-index: 999;
       display: flex; flex-direction: column; gap: 0.5rem;
@@ -505,14 +548,27 @@ pub async fn dashboard(
     .toast.error {{ border-color: rgba(239,68,68,0.5); }}
     @keyframes toast-in {{ from {{ opacity: 0; transform: translateX(100%); }} to {{ opacity: 1; transform: translateX(0); }} }}
     @keyframes toast-out {{ from {{ opacity: 1; }} to {{ opacity: 0; transform: translateX(100%); }} }}
-    @media (max-width: 500px) {{
+    .loading-bar {{
+      position: fixed; top: 0; left: 0; z-index: 9999;
+      width: 0; height: 3px;
+      background: linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa);
+      border-radius: 0 2px 2px 0;
+      transition: width 0.3s ease, opacity 0.3s;
+      opacity: 0;
+      box-shadow: 0 0 12px rgba(99,102,241,0.5);
+    }}
+    .loading-bar.active {{ width: 60%; opacity: 1; }}
+    .loading-bar.done {{ width: 100%; opacity: 0; transition: width 0.15s, opacity 0.4s 0.15s; }}
+    @media (max-width: 640px) {{
       .url-cell {{ max-width: 100px; }}
       .date-cell {{ display: none; }}
       th:nth-child(5), td:nth-child(5) {{ display: none; }}
+      .qr-cell, th:nth-child(6), td:nth-child(6) {{ display: none; }}
     }}
   </style>
 </head>
 <body>
+  <div class="loading-bar" id="loading-bar"></div>
   <div class="toast-container" id="toast-container"></div>
   <div class="container">
     <div class="header">
@@ -552,6 +608,14 @@ pub async fn dashboard(
       c.appendChild(t);
       setTimeout(function() {{ if (t.parentNode) t.parentNode.removeChild(t); }}, 4200);
     }}
+    var loadBar = document.getElementById('loading-bar');
+    document.body.addEventListener('htmx:beforeRequest', function() {{
+      loadBar.className = 'loading-bar active';
+    }});
+    document.body.addEventListener('htmx:afterRequest', function() {{
+      loadBar.className = 'loading-bar done';
+      setTimeout(function() {{ loadBar.className = 'loading-bar'; }}, 600);
+    }});
     document.body.addEventListener('htmx:beforeSwap', function(evt) {{
       if (evt.detail.xhr && evt.detail.xhr.status >= 400) {{
         showToast(evt.detail.serverResponse || 'Request failed', 'error');
@@ -575,6 +639,9 @@ pub async fn dashboard(
                                 <th class='num'>Visits</th>
                                 <th>Actions</th>
                                 <th>Created</th>
+                                <th>QR</th>
+                                <th>Expires</th>
+                                <th></th>
                             </tr></thead>
                             <tbody>{rows}</tbody>
                         </table></div>"##
@@ -602,10 +669,10 @@ pub async fn clicks(
     Path(short_code): Path<String>,
 ) -> impl IntoResponse {
     let visits = match get_link_db(&state, &short_code).await {
-        Ok(Some((_, v))) => v,
+        Ok(Some((_, v, _, _))) => v,
         Ok(None) => {
             return Html(
-                r##"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Not found</title><style>body{font-family:system-ui;background:#0f172a;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#e2e8f0;}</style></head><body><p>Link not found. <a href="/dashboard" style="color:#818cf8">Go to dashboard</a></p></body></html>"##,
+                r##"<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Not found</title><style>body{font-family:system-ui;background:#0b1120;display:flex;align-items:center;justify-content:center;min-height:100vh;color:#e2e8f0;}</style></head><body><p>Link not found. <a href="/dashboard" style="color:#818cf8">Go to dashboard</a></p></body></html>"##,
             )
             .into_response();
         }
@@ -755,7 +822,7 @@ pub async fn stats(
 ) -> impl IntoResponse {
     let is_htmx = headers.contains_key("hx-request");
     match get_link_db(&state, &short_code).await {
-        Ok(Some((original_url, visits))) => {
+        Ok(Some((original_url, visits, _, _))) => {
             if is_htmx {
                 match qr_svg(&short_code) {
                     Ok(qr) => Html(format!(
@@ -816,5 +883,31 @@ pub async fn stats(
                     .into_response()
             }
         }
+    }
+}
+
+pub async fn delete_link(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Path(short_code): Path<String>,
+    Query(query): Query<DashboardQuery>,
+) -> impl IntoResponse {
+    let is_admin = query
+        .admin_token
+        .as_deref()
+        .map(|t| t == state.admin_token)
+        .unwrap_or(false);
+    if !is_admin {
+        let creator_id = get_or_create_creator_id(&headers);
+        match get_link_creator_db(&state, &short_code).await {
+            Ok(Some(c)) if c == creator_id => {}
+            _ => {
+                return (StatusCode::FORBIDDEN, "forbidden").into_response();
+            }
+        }
+    }
+    match delete_link_db(&state, &short_code).await {
+        Ok(()) => StatusCode::OK.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }

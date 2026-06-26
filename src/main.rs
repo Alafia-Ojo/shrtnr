@@ -7,7 +7,7 @@ mod templates;
 mod util;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use r2d2_sqlite::SqliteConnectionManager;
 use state::AppState;
 use std::sync::Arc;
@@ -15,8 +15,8 @@ use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
 use handlers::{
-    clicks, dashboard, health, index, qr_code, qr_code_png, redirect, shorten_form, shorten_json,
-    stats,
+    clicks, dashboard, delete_link, health, index, qr_code, qr_code_png, redirect, shorten_form,
+    shorten_json, stats,
 };
 
 #[tokio::main]
@@ -60,6 +60,7 @@ async fn main() {
         .route("/clicks/{short_code}", get(clicks))
         .route("/qr/{short_code}", get(qr_code))
         .route("/qr/{short_code}/png", get(qr_code_png))
+        .route("/delete/{short_code}", delete(delete_link))
         .route("/{short_code}", get(redirect))
         .layer(CorsLayer::permissive())
         .with_state(state);

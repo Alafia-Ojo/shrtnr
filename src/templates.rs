@@ -202,6 +202,7 @@ pub const INDEX_HTML: &str = r##"<!DOCTYPE html>
     .footer a:hover { text-decoration: underline; }
     .optional { color: #64748b; font-weight: 400; }
     .code-input { margin-top: 0; }
+    select.code-input { cursor: pointer; appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2364748b' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 0.75rem center; padding-right: 2rem; }
     .qr-download { text-align: center; margin: 0.25rem 0 0.5rem; }
     .qr-download a { color: #64748b; font-size: 0.75rem; text-decoration: none; }
     .qr-download a:hover { color: #818cf8; text-decoration: underline; }
@@ -217,6 +218,17 @@ pub const INDEX_HTML: &str = r##"<!DOCTYPE html>
       background: #e2e8f0;
       padding: 8px;
     }
+    .loading-bar {
+      position: fixed; top: 0; left: 0; z-index: 9999;
+      width: 0; height: 3px;
+      background: linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa);
+      border-radius: 0 2px 2px 0;
+      transition: width 0.3s ease, opacity 0.3s;
+      opacity: 0;
+      box-shadow: 0 0 12px rgba(99,102,241,0.5);
+    }
+    .loading-bar.active { width: 60%; opacity: 1; }
+    .loading-bar.done { width: 100%; opacity: 0; transition: width 0.15s, opacity 0.4s 0.15s; }
     @keyframes fade-in {
       from { opacity: 0; }
       to { opacity: 1; }
@@ -253,6 +265,7 @@ pub const INDEX_HTML: &str = r##"<!DOCTYPE html>
   </style>
 </head>
 <body>
+  <div class="loading-bar" id="loading-bar"></div>
   <div class="toast-container" id="toast-container"></div>
   <div class="container">
     <div class="logo">
@@ -275,6 +288,16 @@ pub const INDEX_HTML: &str = r##"<!DOCTYPE html>
       <div class="input-group">
         <label for="code">Custom code <span class="optional">(optional)</span></label>
         <input class="code-input" type="text" id="code" name="code" placeholder="my-custom-link" maxlength="20">
+      </div>
+      <div class="input-group">
+        <label for="expiry">Link expires</label>
+        <select class="code-input" id="expiry" name="expiry">
+          <option value="">Never</option>
+          <option value="1">1 Hour</option>
+          <option value="24">1 Day</option>
+          <option value="168">1 Week</option>
+          <option value="720">30 Days</option>
+        </select>
       </div>
     </form>
     <div id="result"></div>
@@ -301,6 +324,14 @@ pub const INDEX_HTML: &str = r##"<!DOCTYPE html>
       c.appendChild(t);
       setTimeout(function() { if (t.parentNode) t.parentNode.removeChild(t); }, 4200);
     }
+    var loadBar = document.getElementById('loading-bar');
+    document.body.addEventListener('htmx:beforeRequest', function() {
+      loadBar.className = 'loading-bar active';
+    });
+    document.body.addEventListener('htmx:afterRequest', function() {
+      loadBar.className = 'loading-bar done';
+      setTimeout(function() { loadBar.className = 'loading-bar'; }, 600);
+    });
     document.body.addEventListener('htmx:beforeSwap', function(evt) {
       if (evt.detail.xhr && evt.detail.xhr.status >= 400) {
         showToast(evt.detail.serverResponse || 'Request failed', 'error');

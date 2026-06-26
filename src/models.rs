@@ -7,6 +7,8 @@ pub struct ShortenRequest {
     pub code: Option<String>,
     #[serde(default)]
     pub creator_id: Option<String>,
+    #[serde(default)]
+    pub expiry: Option<String>,
 }
 
 #[derive(Deserialize)]

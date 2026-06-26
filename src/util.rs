@@ -54,6 +54,14 @@ pub fn generate_code() -> String {
     nanoid::nanoid!(SHORT_CODE_LEN)
 }
 
+pub fn parse_expiry(value: &str) -> Option<i64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    trimmed.parse::<i64>().ok().filter(|h| *h > 0)
+}
+
 pub fn client_ip(headers: &HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
@@ -84,11 +92,22 @@ pub fn check_rate_limit(state: &SharedState, ip: &str) -> std::result::Result<()
 pub async fn validate_url(url: &str) -> std::result::Result<(), String> {
     let url = url.to_owned();
     tokio::task::spawn_blocking(move || {
-        attohttpc::head(&url)
+        let ua = "Mozilla/5.0 (compatible; Shrtnr/1.0)";
+        match attohttpc::head(&url)
+            .header("User-Agent", ua)
             .timeout(std::time::Duration::from_secs(5))
             .send()
-            .map_err(|_| "unable to reach URL. check that it exists.".to_string())?;
-        Ok(())
+        {
+            Ok(r) if r.is_success() || r.status().is_redirection() => return Ok(()),
+            _ => {}
+        }
+        attohttpc::get(&url)
+            .header("User-Agent", ua)
+            .header("Range", "bytes=0-0")
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .map(|_| ())
+            .map_err(|_| "unable to reach URL. check that it exists.".to_string())
     })
     .await
     .map_err(|e| format!("internal error: {e}"))?
@@ -99,6 +118,7 @@ pub async fn insert_with_code(
     code: &str,
     url: &str,
     creator_id: &str,
+    expires_hours: Option<i64>,
 ) -> std::result::Result<(), String> {
     let pool = state.pool.clone();
     let code = code.to_owned();
@@ -106,7 +126,8 @@ pub async fn insert_with_code(
     let creator_id = creator_id.to_owned();
     tokio::task::spawn_blocking(move || {
         let conn = pool.get().map_err(|e| e.to_string())?;
-        crate::db::insert_link(&conn, &code, &url, &creator_id).map_err(|e| e.to_string())
+        crate::db::insert_link(&conn, &code, &url, &creator_id, expires_hours)
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("internal error: {e}"))?
@@ -115,7 +136,7 @@ pub async fn insert_with_code(
 pub async fn get_link_db(
     state: &SharedState,
     code: &str,
-) -> std::result::Result<Option<(String, i64)>, String> {
+) -> std::result::Result<Option<crate::db::LinkInfo>, String> {
     let pool = state.pool.clone();
     let code = code.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -129,7 +150,7 @@ pub async fn get_link_db(
 pub async fn get_all_links_db(
     state: &SharedState,
     creator_id: Option<String>,
-) -> std::result::Result<Vec<(String, String, i64, String)>, String> {
+) -> std::result::Result<Vec<crate::db::LinkRow>, String> {
     let pool = state.pool.clone();
     tokio::task::spawn_blocking(move || {
         let conn = pool.get().map_err(|e| e.to_string())?;
@@ -180,4 +201,32 @@ pub fn increment_visits_db(state: &SharedState, code: &str) {
             let _ = crate::db::increment_visits(&conn, &code);
         }
     });
+}
+
+pub async fn delete_link_db(
+    state: &SharedState,
+    short_code: &str,
+) -> std::result::Result<(), String> {
+    let pool = state.pool.clone();
+    let short_code = short_code.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| e.to_string())?;
+        crate::db::delete_link(&conn, &short_code).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("internal error: {e}"))?
+}
+
+pub async fn get_link_creator_db(
+    state: &SharedState,
+    short_code: &str,
+) -> std::result::Result<Option<String>, String> {
+    let pool = state.pool.clone();
+    let short_code = short_code.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| e.to_string())?;
+        crate::db::get_link_creator(&conn, &short_code).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("internal error: {e}"))?
 }
