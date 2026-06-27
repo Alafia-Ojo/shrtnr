@@ -4,6 +4,7 @@ pub const INDEX_HTML: &str = r##"<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Shrtnr</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <script src="https://unpkg.com/htmx.org@2"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
@@ -293,10 +294,15 @@ pub const INDEX_HTML: &str = r##"<!DOCTYPE html>
         <label for="expiry">Link expires</label>
         <select class="code-input" id="expiry" name="expiry">
           <option value="">Never</option>
-          <option value="1">1 Hour</option>
-          <option value="24">1 Day</option>
-          <option value="168">1 Week</option>
-          <option value="720">30 Days</option>
+          <option value="30">30 Minutes</option>
+          <option value="60">1 Hour</option>
+          <option value="120">2 Hours</option>
+          <option value="360">6 Hours</option>
+          <option value="720">12 Hours</option>
+          <option value="1440">1 Day</option>
+          <option value="4320">3 Days</option>
+          <option value="10080">1 Week</option>
+          <option value="43200">30 Days</option>
         </select>
       </div>
     </form>

@@ -15,8 +15,8 @@ use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
 use handlers::{
-    clicks, dashboard, delete_link, health, index, qr_code, qr_code_png, redirect, shorten_form,
-    shorten_json, stats,
+    clicks, dashboard, delete_link, favicon_ico, health, index, qr_code, qr_code_png, redirect,
+    shorten_form, shorten_json, stats,
 };
 
 #[tokio::main]
@@ -61,6 +61,7 @@ async fn main() {
         .route("/qr/{short_code}", get(qr_code))
         .route("/qr/{short_code}/png", get(qr_code_png))
         .route("/delete/{short_code}", delete(delete_link))
+        .route("/favicon.ico", get(favicon_ico))
         .route("/{short_code}", get(redirect))
         .layer(CorsLayer::permissive())
         .with_state(state);

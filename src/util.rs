@@ -54,12 +54,12 @@ pub fn generate_code() -> String {
     nanoid::nanoid!(SHORT_CODE_LEN)
 }
 
-pub fn parse_expiry(value: &str) -> Option<i64> {
+pub fn parse_expiry_minutes(value: &str) -> Option<i64> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
     }
-    trimmed.parse::<i64>().ok().filter(|h| *h > 0)
+    trimmed.parse::<i64>().ok().filter(|m| *m > 0)
 }
 
 pub fn client_ip(headers: &HeaderMap) -> String {
@@ -118,7 +118,7 @@ pub async fn insert_with_code(
     code: &str,
     url: &str,
     creator_id: &str,
-    expires_hours: Option<i64>,
+    expires_minutes: Option<i64>,
 ) -> std::result::Result<(), String> {
     let pool = state.pool.clone();
     let code = code.to_owned();
@@ -126,7 +126,7 @@ pub async fn insert_with_code(
     let creator_id = creator_id.to_owned();
     tokio::task::spawn_blocking(move || {
         let conn = pool.get().map_err(|e| e.to_string())?;
-        crate::db::insert_link(&conn, &code, &url, &creator_id, expires_hours)
+        crate::db::insert_link(&conn, &code, &url, &creator_id, expires_minutes)
             .map_err(|e| e.to_string())
     })
     .await

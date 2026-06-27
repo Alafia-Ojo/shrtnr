@@ -12,7 +12,7 @@ use crate::templates::INDEX_HTML;
 use crate::util::{
     check_rate_limit, client_ip, delete_link_db, ensure_scheme, generate_code, get_all_links_db,
     get_clicks_db, get_link_creator_db, get_link_db, get_or_create_creator_id,
-    increment_visits_db, insert_with_code, log_click_db, parse_expiry, public_url,
+    increment_visits_db, insert_with_code, log_click_db, parse_expiry_minutes, public_url,
     validate_custom_code, validate_url,
 };
 
@@ -58,7 +58,7 @@ pub async fn shorten_form(
         Some(id) => id.to_owned(),
         None => get_or_create_creator_id(&headers),
     };
-    let expires_hours = req.expiry.as_deref().and_then(parse_expiry);
+    let expires_minutes = req.expiry.as_deref().and_then(parse_expiry_minutes);
     let short_code = match req.code.as_deref().and_then(|c| {
         let t = c.trim();
         if t.is_empty() { None } else { Some(t) }
@@ -67,7 +67,7 @@ pub async fn shorten_form(
             if let Err(e) = validate_custom_code(trimmed) {
                 return Html(format!(r#"<div class="card error">{e}</div>"#));
             }
-            match insert_with_code(&state, trimmed, &url, &creator_id, expires_hours).await {
+            match insert_with_code(&state, trimmed, &url, &creator_id, expires_minutes).await {
                 Ok(()) => trimmed.to_owned(),
                 Err(e) if e.contains("UNIQUE") => {
                     return Html(
@@ -79,7 +79,7 @@ pub async fn shorten_form(
         }
         None => loop {
             let code = generate_code();
-            match insert_with_code(&state, &code, &url, &creator_id, expires_hours).await {
+            match insert_with_code(&state, &code, &url, &creator_id, expires_minutes).await {
                 Ok(()) => break code,
                 Err(e) if e.contains("UNIQUE") => continue,
                 Err(e) => return Html(format!(r#"<div class="card error">Error: {e}</div>"#)),
@@ -142,7 +142,7 @@ pub async fn shorten_json(
         Some(id) => id.to_owned(),
         None => get_or_create_creator_id(&headers),
     };
-    let expires_hours = req.expiry.as_deref().and_then(parse_expiry);
+    let expires_minutes = req.expiry.as_deref().and_then(parse_expiry_minutes);
     let short_code = match req.code.as_deref().and_then(|c| {
         let t = c.trim();
         if t.is_empty() { None } else { Some(t) }
@@ -155,7 +155,7 @@ pub async fn shorten_json(
                 )
                     .into_response();
             }
-            match insert_with_code(&state, trimmed, &url, &creator_id, expires_hours).await {
+            match insert_with_code(&state, trimmed, &url, &creator_id, expires_minutes).await {
                 Ok(()) => trimmed.to_owned(),
                 Err(e) if e.contains("UNIQUE") => {
                     return (
@@ -177,7 +177,7 @@ pub async fn shorten_json(
         }
         None => loop {
             let code = generate_code();
-            match insert_with_code(&state, &code, &url, &creator_id, expires_hours).await {
+            match insert_with_code(&state, &code, &url, &creator_id, expires_minutes).await {
                 Ok(()) => break code,
                 Err(e) if e.contains("UNIQUE") => continue,
                 Err(e) => {
@@ -384,6 +384,7 @@ pub async fn dashboard(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Dashboard · Shrtnr</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <script src="https://unpkg.com/htmx.org@2"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
@@ -710,6 +711,7 @@ pub async fn clicks(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Clicks · {code} · Shrtnr</title>
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:opsz@14..32&display=swap" rel="stylesheet">
   <style>
@@ -910,4 +912,14 @@ pub async fn delete_link(
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
+}
+
+pub async fn favicon_ico() -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "image/x-icon",
+        )],
+        include_bytes!("../static/favicon.ico"),
+    )
 }

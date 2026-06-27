@@ -38,11 +38,11 @@ pub fn insert_link(
     short_code: &str,
     original_url: &str,
     creator_id: &str,
-    expires_hours: Option<i64>,
+    expires_minutes: Option<i64>,
 ) -> Result<()> {
-    match expires_hours {
-        Some(h) => {
-            let modifier = format!("+{} hours", h);
+    match expires_minutes {
+        Some(m) => {
+            let modifier = format!("+{} minutes", m);
             conn.execute(
                 "INSERT INTO links (short_code, original_url, creator_id, expires_at) VALUES (?1, ?2, ?3, datetime('now', ?4))",
                 params![short_code, original_url, creator_id, modifier],
