@@ -3,6 +3,7 @@ RUN apk add --no-cache musl-dev
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY static ./static
 RUN cargo build --release
 
 FROM alpine:3.21
